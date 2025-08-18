@@ -25,7 +25,7 @@ except ImportError:
 class GeneralUnitreeController:
     """General Unitree robot controller supporting multiple robot types"""
     
-    def __init__(self, network_interface: str, robot_type: unitree_interface.RobotType, 
+    def __init__(self, network_interface: str, robot_type: unitree_interface.RobotType=unitree_interface.RobotType.G1, 
                  message_type: unitree_interface.MessageType = unitree_interface.MessageType.HG):
         """
         Initialize the controller
@@ -140,6 +140,10 @@ class GeneralUnitreeController:
             for i in range(10, 12):  # Right ankle joints
                 q_target[i] = max_amplitude * math.sin(2.0 * math.pi * t)
             cmd.q_target = q_target
+
+        # # print final command
+        # for i in range(self.num_motors):
+        #     print(f"q_target[{i}] = {cmd.q_target[i]:.3f}")
 
         # Set all dq_target to 0 (position control)
         dq_target = list(cmd.dq_target)

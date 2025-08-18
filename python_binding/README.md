@@ -110,6 +110,8 @@ robot.write_low_command(cmd)
 ```bash
 # G1 机器人示例
 python3 example_general_interface.py eth0 G1
+python example_ankle_swing.py enp0s31f6 G1
+
 
 # H1 机器人示例
 python3 example_general_interface.py eth0 H1 GO2

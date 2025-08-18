@@ -162,7 +162,7 @@ echo "     import unitree_interface"
 echo "     robot = unitree_interface.create_robot('eth0', unitree_interface.RobotType.G1)"
 echo ""
 echo "Files created:"
-echo "  - build/python_binding/unitree_interface*.so (compiled Python module)"
+echo "  - build/lib/unitree_interface*.so (compiled Python module)"
 if [ -f "../unitree_interface_generated.pyi" ]; then
     echo "  - ../unitree_interface_generated.pyi (type hints)"
 fi
