@@ -12,6 +12,7 @@ import time
 import math
 import sys
 import os
+import numpy as np
 
 # Add the build directory to the path
 # Try multiple possible locations for the module (prioritize current directory)
@@ -47,6 +48,18 @@ try:
     print(f"📍 Module location: {ui.__file__ if hasattr(ui, '__file__') else 'Unknown'}")
     print(f"🔍 Available classes: {[x for x in dir(ui) if 'Interface' in x]}")
     print(f"🔍 HandInterface available: {hasattr(ui, 'HandInterface')}")
+    
+    # Dex3-1 hand poses
+    HAND_POSES = {
+        "left": {
+            "open": np.array([0, 0, 0, 0, 0, 0, 0]),
+            "close": np.array([0, 1.0, 1.74, -1.57, -1.74, -1.57, -1.74])
+        },
+        "right": {
+            "open": np.array([0, 0, 0, 0, 0, 0, 0]),
+            "close": np.array([0, -1.0, -1.74, 1.57, 1.74, 1.57, 1.74])
+        }
+    }
 except ImportError as e:
     print(f"❌ Failed to import unitree_interface: {e}")
     print("Make sure you have built the Python bindings first:")
@@ -131,17 +144,13 @@ class UnifiedHandController:
         
         # Read states (would work with real hardware)
         print("📥 Reading hand states...")
-        try:
-            left_state = self.left_hand.read_hand_state()
-            right_state = self.right_hand.read_hand_state()
-            
-            print(f"🤚 Left hand motor positions: {[f'{q:.3f}' for q in left_state.motor.q]}")
-            print(f"🤚 Right hand motor positions: {[f'{q:.3f}' for q in right_state.motor.q]}")
-            print(f"⚡ Left hand power: {left_state.power_v:.2f}V")
-            print(f"⚡ Right hand power: {right_state.power_v:.2f}V")
-            
-        except Exception as e:
-            print(f"ℹ️  State reading would work with real hardware (got: {e})")
+        left_state = self.left_hand.read_hand_state()
+        right_state = self.right_hand.read_hand_state()
+        
+        print(f"🤚 Left hand motor positions: {[f'{q:.3f}' for q in left_state.motor.q]}")
+        print(f"🤚 Right hand motor positions: {[f'{q:.3f}' for q in right_state.motor.q]}")
+        print(f"⚡ Left hand power: {left_state.power_v:.2f}V")
+        print(f"⚡ Right hand power: {right_state.power_v:.2f}V")
     
     def test_convenience_functions(self):
         """Test convenience functions"""
@@ -164,6 +173,61 @@ class UnifiedHandController:
         kp = self.left_hand.get_default_kp()
         kd = self.left_hand.get_default_kd()
         print(f"⚙️  Default gains: Kp={kp[0]:.2f}, Kd={kd[0]:.2f}")
+    
+    def interpolation_demo(self):
+        """Demonstrate 5-second interpolation between open and close poses"""
+        print("\n🎬 5-Second Hand Interpolation Demo...")
+        
+        # Get poses
+        left_open = HAND_POSES["left"]["open"]
+        left_close = HAND_POSES["left"]["close"]
+        right_open = HAND_POSES["right"]["open"]
+        right_close = HAND_POSES["right"]["close"]
+        
+        print(f"📐 Left open:  {left_open}")
+        print(f"📐 Left close: {left_close}")
+        print(f"📐 Right open:  {right_open}")
+        print(f"📐 Right close: {right_close}")
+        
+        duration = 5.0  # 5 seconds
+        control_freq = 20  # 20 Hz
+        dt = 1.0 / control_freq
+        steps = int(duration / dt)
+        
+        print(f"🎯 Running {duration}s interpolation at {control_freq}Hz ({steps} steps)")
+        
+        for i in range(steps + 1):
+            # Interpolation factor: 0 -> 1 -> 0 (open -> close -> open)
+            t = i / steps  # 0 to 1
+            if t <= 0.5:
+                alpha = 2 * t  # 0 to 1 in first half
+            else:
+                alpha = 2 * (1 - t)  # 1 to 0 in second half
+            
+            # Interpolate positions
+            left_pos = left_open + alpha * (left_close - left_open)
+            right_pos = right_open + alpha * (right_close - right_open)
+            
+            # Create commands
+            left_cmd = self.left_hand.create_zero_command()
+            right_cmd = self.right_hand.create_zero_command()
+            
+            left_cmd.q_target = left_pos.tolist()
+            right_cmd.q_target = right_pos.tolist()
+            
+            # Send commands
+            self.left_hand.write_hand_command(left_cmd)
+            self.right_hand.write_hand_command(right_cmd)
+            
+            # Progress indicator
+            if i % (steps // 10) == 0:
+                progress = int(10 * i / steps)
+                bar = "█" * progress + "░" * (10 - progress)
+                print(f"\r⏱️  Progress: [{bar}] {i/steps*100:.1f}% (α={alpha:.2f})", end="", flush=True)
+            
+            time.sleep(dt)
+        
+        print(f"\n✅ Interpolation complete! Hands returned to open position")
     
     def demonstrate_integration_with_robot(self):
         """Show how hand control integrates with robot control"""
@@ -204,13 +268,14 @@ def main():
     controller.demonstrate_unified_api()
     controller.test_hand_control()
     controller.test_convenience_functions()
+    controller.interpolation_demo()
     controller.demonstrate_integration_with_robot()
     
     print("\n" + "=" * 60)
     print("✅ All demonstrations completed successfully!")
     print("🔧 Ready for real hardware control!")
     print("=" * 60)
-    
+    exit()
     
 
 
