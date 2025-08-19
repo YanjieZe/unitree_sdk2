@@ -26,6 +26,11 @@ PYBIND11_MODULE(unitree_interface, m) {
         .value("AB", PyControlMode::AB)
         .export_values();
     
+    py::enum_<HandType>(m, "HandType")
+        .value("LEFT_HAND", HandType::LEFT_HAND)
+        .value("RIGHT_HAND", HandType::RIGHT_HAND)
+        .export_values();
+    
     // Data structures
     py::class_<PyImuState>(m, "ImuState")
         .def(py::init<>())
@@ -70,6 +75,50 @@ PYBIND11_MODULE(unitree_interface, m) {
         .def_readwrite("message_type", &RobotConfig::message_type)
         .def_readwrite("num_motors", &RobotConfig::num_motors)
         .def_readwrite("name", &RobotConfig::name);
+    
+    // Hand data structures
+    py::class_<PyHandMotorState>(m, "HandMotorState")
+        .def(py::init<>())
+        .def_readwrite("q", &PyHandMotorState::q)
+        .def_readwrite("dq", &PyHandMotorState::dq)
+        .def_readwrite("tau_est", &PyHandMotorState::tau_est)
+        .def_readwrite("temperature", &PyHandMotorState::temperature)
+        .def_readwrite("voltage", &PyHandMotorState::voltage);
+
+    py::class_<PyHandMotorCommand>(m, "HandMotorCommand")
+        .def(py::init<>())
+        .def_readwrite("q_target", &PyHandMotorCommand::q_target)
+        .def_readwrite("dq_target", &PyHandMotorCommand::dq_target)
+        .def_readwrite("kp", &PyHandMotorCommand::kp)
+        .def_readwrite("kd", &PyHandMotorCommand::kd)
+        .def_readwrite("tau_ff", &PyHandMotorCommand::tau_ff);
+
+    py::class_<PyHandPressSensorState>(m, "HandPressSensorState")
+        .def(py::init<>())
+        .def_readwrite("pressure", &PyHandPressSensorState::pressure)
+        .def_readwrite("temperature", &PyHandPressSensorState::temperature)
+        .def_readwrite("lost", &PyHandPressSensorState::lost)
+        .def_readwrite("reserve", &PyHandPressSensorState::reserve);
+
+    py::class_<PyHandImuState>(m, "HandImuState")
+        .def(py::init<>())
+        .def_readwrite("quaternion", &PyHandImuState::quaternion)
+        .def_readwrite("gyroscope", &PyHandImuState::gyroscope)
+        .def_readwrite("accelerometer", &PyHandImuState::accelerometer)
+        .def_readwrite("rpy", &PyHandImuState::rpy)
+        .def_readwrite("temperature", &PyHandImuState::temperature);
+
+    py::class_<PyHandState>(m, "HandState")
+        .def(py::init<>())
+        .def_readwrite("motor", &PyHandState::motor)
+        .def_readwrite("press_sensor", &PyHandState::press_sensor)
+        .def_readwrite("imu", &PyHandState::imu)
+        .def_readwrite("power_v", &PyHandState::power_v)
+        .def_readwrite("power_a", &PyHandState::power_a)
+        .def_readwrite("system_v", &PyHandState::system_v)
+        .def_readwrite("device_v", &PyHandState::device_v)
+        .def_readwrite("error", &PyHandState::error)
+        .def_readwrite("reserve", &PyHandState::reserve);
     
     // Main interface class
     py::class_<UnitreeInterface, std::shared_ptr<UnitreeInterface>>(m, "UnitreeInterface")
@@ -126,8 +175,82 @@ PYBIND11_MODULE(unitree_interface, m) {
         return std::make_shared<UnitreeInterface>(network_interface, config);
     }, py::arg("network_interface"), py::arg("config"));
     
+    // Hand Interface Class
+    py::class_<HandInterface, std::shared_ptr<HandInterface>>(m, "HandInterface")
+        // Constructor
+        .def(py::init<const std::string&, HandType, bool>(), 
+             py::arg("network_interface"), py::arg("hand_type"), py::arg("re_init") = true,
+             "Initialize hand interface with network interface, hand type, and optional re_init flag")
+        
+        // Core interface methods
+        .def("read_hand_state", &HandInterface::ReadHandState,
+             "Read current hand state including motor positions, sensors, and IMU data")
+        .def("write_hand_command", &HandInterface::WriteHandCommand,
+             "Send motor commands to the hand")
+        
+        // Utility methods
+        .def("create_zero_command", &HandInterface::CreateZeroCommand,
+             "Create a zero command with default gains")
+        .def("create_default_command", &HandInterface::CreateDefaultCommand,
+             "Create a command with default pose and gains")
+        .def("get_default_kp", &HandInterface::GetDefaultKp,
+             "Get default proportional gains for all joints")
+        .def("get_default_kd", &HandInterface::GetDefaultKd,
+             "Get default derivative gains for all joints")
+        .def("get_max_limits", &HandInterface::GetMaxLimitsArray,
+             "Get maximum joint angle limits")
+        .def("get_min_limits", &HandInterface::GetMinLimitsArray,
+             "Get minimum joint angle limits")
+        
+        // Configuration methods
+        .def("get_hand_type", &HandInterface::GetHandType,
+             "Get the hand type (LEFT_HAND or RIGHT_HAND)")
+        .def("get_hand_name", &HandInterface::GetHandName,
+             "Get the hand name string")
+        
+        // Joint manipulation utilities
+        .def("clamp_joint_angles", &HandInterface::ClampJointAngles,
+             "Clamp joint angles to valid range in-place")
+        .def("normalize_joint_angles", &HandInterface::NormalizeJointAngles,
+             "Normalize joint angles to [0, 1] range based on joint limits")
+        
+        // Static factory methods
+        .def_static("create_left_hand", &HandInterface::CreateLeftHand,
+                   py::arg("network_interface"), py::arg("re_init") = true,
+                   "Create a left hand interface")
+        .def_static("create_right_hand", &HandInterface::CreateRightHand,
+                   py::arg("network_interface"), py::arg("re_init") = true,
+                   "Create a right hand interface");
+    
+    // Hand module-level convenience functions
+    m.def("create_hand", [](const std::string& network_interface, HandType hand_type, bool re_init = true) {
+        if (hand_type == HandType::LEFT_HAND) {
+            return HandInterface::CreateLeftHand(network_interface, re_init);
+        } else {
+            return HandInterface::CreateRightHand(network_interface, re_init);
+        }
+    }, py::arg("network_interface"), py::arg("hand_type"), py::arg("re_init") = true,
+       "Create a hand interface based on hand type");
+    
+    m.def("create_dual_hands", [](const std::string& network_interface, bool re_init = true) {
+        auto left_hand = HandInterface::CreateLeftHand(network_interface, re_init);
+        auto right_hand = HandInterface::CreateRightHand(network_interface, false); // Don't re-init for second hand
+        return py::make_tuple(left_hand, right_hand);
+    }, py::arg("network_interface"), py::arg("re_init") = true,
+       "Create both left and right hand interfaces (left hand initializes DDS, right hand uses existing connection)");
+    
     // Constants
     m.attr("G1_NUM_MOTOR") = 29;
     m.attr("H1_NUM_MOTOR") = 19;
     m.attr("H1_2_NUM_MOTOR") = 29;
+    
+    // Hand constants
+    m.attr("DEX3_NUM_MOTORS") = DEX3_NUM_MOTORS;
+    m.attr("DEX3_NUM_PRESS_SENSORS") = DEX3_NUM_PRESS_SENSORS;
+    
+    // Hand topic names
+    m.attr("LEFT_HAND_CMD_TOPIC") = LEFT_HAND_CMD_TOPIC;
+    m.attr("LEFT_HAND_STATE_TOPIC") = LEFT_HAND_STATE_TOPIC;
+    m.attr("RIGHT_HAND_CMD_TOPIC") = RIGHT_HAND_CMD_TOPIC;
+    m.attr("RIGHT_HAND_STATE_TOPIC") = RIGHT_HAND_STATE_TOPIC;
 } 

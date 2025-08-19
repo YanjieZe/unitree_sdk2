@@ -89,10 +89,16 @@ fi
 echo -e "${YELLOW}Checking dependencies...${NC}"
 
 # Check for pybind11
-python -c "import pybind11" 2>/dev/null || {
+echo "Testing pybind11..."
+if ! python -c "import pybind11" 2>/dev/null; then
     echo -e "${RED}pybind11 not found. Install with: pip install pybind11${NC}"
+    echo "Available python: $(which python)"
+    python -c "import sys; print('Python version:', sys.version)"
+    python -c "import sys; print('Python path:', sys.path[:3])"
     exit 1
-}
+else
+    echo -e "${GREEN}pybind11 found${NC}"
+fi
 
 # Check for cmake
 command -v cmake >/dev/null 2>&1 || {

@@ -20,6 +20,10 @@
 #include <unitree/idl/go2/LowState_.hpp>
 #include <unitree/idl/go2/WirelessController_.hpp>
 
+// IDL - Hand control
+#include <unitree/idl/hg/HandCmd_.hpp>
+#include <unitree/idl/hg/HandState_.hpp>
+
 #include "unitree/common/thread/thread.hpp"
 
 using namespace unitree::common;
@@ -31,6 +35,12 @@ static const std::string HG_STATE_TOPIC = "rt/lowstate";
 static const std::string GO2_CMD_TOPIC = "rt/lowcmd";
 static const std::string GO2_STATE_TOPIC = "rt/lowstate";
 static const std::string TOPIC_JOYSTICK = "rt/wirelesscontroller";
+
+// Hand topic definitions
+static const std::string LEFT_HAND_CMD_TOPIC = "rt/dex3/left/cmd";
+static const std::string LEFT_HAND_STATE_TOPIC = "rt/dex3/left/state"; 
+static const std::string RIGHT_HAND_CMD_TOPIC = "rt/dex3/right/cmd";
+static const std::string RIGHT_HAND_STATE_TOPIC = "rt/dex3/right/state";
 
 // Robot configurations
 enum class RobotType {
@@ -44,6 +54,16 @@ enum class MessageType {
     HG = 0,   // Humanoid/Go1 message format
     GO2 = 1   // Go2 message format
 };
+
+// Hand configurations
+enum class HandType {
+    LEFT_HAND = 0,
+    RIGHT_HAND = 1
+};
+
+// Constants for Dex3-1 hands
+static const int DEX3_NUM_MOTORS = 7;
+static const int DEX3_NUM_PRESS_SENSORS = 9;
 
 // Robot configuration structure
 struct RobotConfig {
@@ -130,6 +150,50 @@ struct PyLowState {
   uint8_t mode_machine = 0;
   
   PyLowState(int num_motors) : motor(num_motors) {}
+};
+
+// Hand-specific Python data structures
+struct PyHandMotorState {
+  std::array<float, DEX3_NUM_MOTORS> q = {};
+  std::array<float, DEX3_NUM_MOTORS> dq = {};
+  std::array<float, DEX3_NUM_MOTORS> tau_est = {};
+  std::array<std::array<float, 2>, DEX3_NUM_MOTORS> temperature = {};
+  std::array<float, DEX3_NUM_MOTORS> voltage = {};
+};
+
+struct PyHandMotorCommand {
+  std::array<float, DEX3_NUM_MOTORS> q_target = {};
+  std::array<float, DEX3_NUM_MOTORS> dq_target = {};
+  std::array<float, DEX3_NUM_MOTORS> kp = {};
+  std::array<float, DEX3_NUM_MOTORS> kd = {};
+  std::array<float, DEX3_NUM_MOTORS> tau_ff = {};
+};
+
+struct PyHandPressSensorState {
+  std::array<std::array<float, 12>, DEX3_NUM_PRESS_SENSORS> pressure = {};
+  std::array<std::array<float, 12>, DEX3_NUM_PRESS_SENSORS> temperature = {};
+  std::array<uint8_t, DEX3_NUM_PRESS_SENSORS> lost = {};
+  std::array<std::array<uint32_t, 4>, DEX3_NUM_PRESS_SENSORS> reserve = {};
+};
+
+struct PyHandImuState {
+  std::array<float, 4> quaternion = {};
+  std::array<float, 3> gyroscope = {};
+  std::array<float, 3> accelerometer = {};
+  std::array<float, 3> rpy = {};
+  float temperature = 0.0f;
+};
+
+struct PyHandState {
+  PyHandMotorState motor;
+  PyHandPressSensorState press_sensor;
+  PyHandImuState imu;
+  float power_v = 0.0f;
+  float power_a = 0.0f;
+  float system_v = 0.0f;
+  float device_v = 0.0f;
+  std::array<uint32_t, 2> error = {};
+  std::array<uint32_t, 2> reserve = {};
 };
 
 enum class PyControlMode {
@@ -270,4 +334,69 @@ class UnitreeInterface {
   static std::shared_ptr<UnitreeInterface> CreateH1(const std::string& networkInterface, MessageType message_type = MessageType::GO2);
   static std::shared_ptr<UnitreeInterface> CreateH1_2(const std::string& networkInterface, MessageType message_type = MessageType::HG);
   static std::shared_ptr<UnitreeInterface> CreateCustom(const std::string& networkInterface, int num_motors, MessageType message_type = MessageType::HG);
+};
+
+// Hand Interface Class
+class HandInterface {
+ private:
+  HandType hand_type_;
+  std::string hand_name_;
+  
+  DataBuffer<PyHandMotorState> motor_state_buffer_;
+  DataBuffer<PyHandMotorCommand> motor_command_buffer_;
+  DataBuffer<PyHandPressSensorState> press_sensor_buffer_;
+  DataBuffer<PyHandImuState> imu_buffer_;
+
+  // DDS components
+  std::shared_ptr<ChannelPublisher<unitree_hg::msg::dds_::HandCmd_>> hand_cmd_publisher_;
+  std::shared_ptr<ChannelSubscriber<unitree_hg::msg::dds_::HandState_>> hand_state_subscriber_;
+  
+  ThreadPtr command_writer_ptr_;
+
+  // Default gains
+  std::array<float, DEX3_NUM_MOTORS> default_kp_;
+  std::array<float, DEX3_NUM_MOTORS> default_kd_;
+
+  void InitDefaultGains();
+  void HandStateHandler(const void *message);
+  void HandCommandWriter();
+  
+  // Convert internal structures to Python structures
+  PyHandState ConvertToPyHandState();
+  
+  // DDS initialization (with re_init support)
+  void InitializeDDS(const std::string& networkInterface, bool re_init);
+
+  // Get joint limits for current hand
+  const std::array<float, DEX3_NUM_MOTORS>& GetMaxLimits() const;
+  const std::array<float, DEX3_NUM_MOTORS>& GetMinLimits() const;
+
+ public:
+  // Constructors
+  explicit HandInterface(const std::string& networkInterface, HandType hand_type, bool re_init = true);
+  ~HandInterface();
+  
+  // Python interface methods
+  PyHandState ReadHandState();
+  void WriteHandCommand(const PyHandMotorCommand& command);
+  
+  // Utility methods
+  PyHandMotorCommand CreateZeroCommand();
+  PyHandMotorCommand CreateDefaultCommand();
+  std::array<float, DEX3_NUM_MOTORS> GetDefaultKp() const;
+  std::array<float, DEX3_NUM_MOTORS> GetDefaultKd() const;
+  std::array<float, DEX3_NUM_MOTORS> GetMaxLimitsArray();
+  std::array<float, DEX3_NUM_MOTORS> GetMinLimitsArray();
+  
+  // Configuration methods
+  HandType GetHandType() const { return hand_type_; }
+  std::string GetHandName() const { return hand_name_; }
+  
+  // Joint manipulation utilities
+  void ClampJointAngles(std::array<float, DEX3_NUM_MOTORS>& joint_angles) const;
+  std::array<float, DEX3_NUM_MOTORS> NormalizeJointAngles(const std::array<float, DEX3_NUM_MOTORS>& joint_angles) const;
+  
+  // Static factory methods
+  static std::shared_ptr<HandInterface> CreateLeftHand(const std::string& networkInterface, bool re_init = true);
+  static std::shared_ptr<HandInterface> CreateRightHand(const std::string& networkInterface, bool re_init = true);
 }; 

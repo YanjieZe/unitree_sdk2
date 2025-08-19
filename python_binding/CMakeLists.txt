@@ -14,14 +14,14 @@ if(NOT TARGET unitree_sdk2)
     message(FATAL_ERROR "unitree_sdk2 target not found. Make sure this is built from the parent project.")
 endif()
 
-# Add source files for general interface
-set(GENERAL_SOURCES
+# Add source files for unified interface (including hand support)
+set(INTERFACE_SOURCES
     unitree_interface.cpp
     unitree_interface_bindings.cpp
 )
 
 # Create pybind11 module
-pybind11_add_module(unitree_interface ${GENERAL_SOURCES})
+pybind11_add_module(unitree_interface ${INTERFACE_SOURCES})
 
 # Compiler-specific options
 target_compile_definitions(unitree_interface PRIVATE VERSION_INFO=${PROJECT_VERSION})
@@ -70,5 +70,5 @@ message(STATUS "CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Using unitree_sdk2 target from parent project")
 message(STATUS "GENERATE_STUBS: ${GENERATE_STUBS}")
 message(STATUS "Modules to build:")
-message(STATUS "  - unitree_interface (general interface for all robot types)")
+message(STATUS "  - unitree_interface (unified interface for robots and hands)")
 message(STATUS "===================================================") 

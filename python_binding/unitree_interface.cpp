@@ -395,4 +395,313 @@ std::shared_ptr<UnitreeInterface> UnitreeInterface::CreateH1_2(const std::string
 
 std::shared_ptr<UnitreeInterface> UnitreeInterface::CreateCustom(const std::string& networkInterface, int num_motors, MessageType message_type) {
     return std::make_shared<UnitreeInterface>(networkInterface, RobotType::CUSTOM, message_type, num_motors);
+}
+
+// ===============================
+// HandInterface Implementation
+// ===============================
+
+// Joint limits for Dex3-1 hands
+static const std::array<float, DEX3_NUM_MOTORS> LEFT_HAND_MAX_LIMITS = 
+    {1.0472f, 1.0472f, 1.74533f, 0.0f, 0.0f, 0.0f, 0.0f};
+static const std::array<float, DEX3_NUM_MOTORS> LEFT_HAND_MIN_LIMITS = 
+    {-1.0472f, -0.724312f, 0.0f, -1.5708f, -1.74533f, -1.5708f, -1.74533f};
+static const std::array<float, DEX3_NUM_MOTORS> RIGHT_HAND_MAX_LIMITS = 
+    {1.0472f, 0.724312f, 0.0f, 1.5708f, 1.74533f, 1.5708f, 1.74533f};
+static const std::array<float, DEX3_NUM_MOTORS> RIGHT_HAND_MIN_LIMITS = 
+    {-1.0472f, -1.0472f, -1.74533f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+// Default hand poses
+static const std::array<float, DEX3_NUM_MOTORS> DEFAULT_LEFT_HAND_POSE = 
+    {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+static const std::array<float, DEX3_NUM_MOTORS> DEFAULT_RIGHT_HAND_POSE = 
+    {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+// RIS Mode structure for hand control
+struct RISMode {
+    uint8_t id     : 4;
+    uint8_t status : 3;
+    uint8_t timeout: 1;
+    
+    uint8_t ToUint8() const {
+        uint8_t mode = 0;
+        mode |= (id & 0x0F);
+        mode |= (status & 0x07) << 4;
+        mode |= (timeout & 0x01) << 7;
+        return mode;
+    }
+};
+
+// Constructor implementation
+HandInterface::HandInterface(const std::string& networkInterface, HandType hand_type, bool re_init)
+    : hand_type_(hand_type) {
+    
+    // Set hand name
+    hand_name_ = (hand_type_ == HandType::LEFT_HAND) ? "LeftHand" : "RightHand";
+    
+    InitDefaultGains();
+    InitializeDDS(networkInterface, re_init);
+}
+
+HandInterface::~HandInterface() {
+    if (command_writer_ptr_) {
+        command_writer_ptr_.reset();
+    }
+    hand_cmd_publisher_.reset();
+    hand_state_subscriber_.reset();
+}
+
+void HandInterface::InitDefaultGains() {
+    // Set default gains for hand motors
+    for (int i = 0; i < DEX3_NUM_MOTORS; ++i) {
+        default_kp_[i] = 0.5f;
+        default_kd_[i] = 0.1f;
+    }
+}
+
+void HandInterface::InitializeDDS(const std::string& networkInterface, bool re_init) {
+    // Initialize DDS only if re_init is true
+    if (re_init) {
+        ChannelFactory::Instance()->Init(0, networkInterface);
+    }
+    
+    // Set up topics based on hand type
+    std::string cmd_topic, state_topic;
+    if (hand_type_ == HandType::LEFT_HAND) {
+        cmd_topic = LEFT_HAND_CMD_TOPIC;
+        state_topic = LEFT_HAND_STATE_TOPIC;
+    } else {
+        cmd_topic = RIGHT_HAND_CMD_TOPIC;
+        state_topic = RIGHT_HAND_STATE_TOPIC;
+    }
+    
+    // Create publisher and subscriber
+    hand_cmd_publisher_ = std::make_shared<ChannelPublisher<unitree_hg::msg::dds_::HandCmd_>>(cmd_topic);
+    hand_state_subscriber_ = std::make_shared<ChannelSubscriber<unitree_hg::msg::dds_::HandState_>>(state_topic);
+    
+    // Initialize channels
+    hand_cmd_publisher_->InitChannel();
+    hand_state_subscriber_->InitChannel(std::bind(&HandInterface::HandStateHandler, this, std::placeholders::_1), 1);
+    
+    // Create command writer thread
+    command_writer_ptr_ = CreateRecurrentThreadEx(
+        "hand_command_writer", UT_CPU_ID_NONE, 2000, &HandInterface::HandCommandWriter, this);
+    
+    std::cout << "HandInterface initialized: " << hand_name_ 
+              << " on interface: " << networkInterface 
+              << " (re_init: " << (re_init ? "true" : "false") << ")" << std::endl;
+}
+
+void HandInterface::HandStateHandler(const void *message) {
+    unitree_hg::msg::dds_::HandState_ hand_state = *(const unitree_hg::msg::dds_::HandState_ *)message;
+    
+    // Process motor state
+    PyHandMotorState motor_state;
+    for (size_t i = 0; i < DEX3_NUM_MOTORS && i < hand_state.motor_state().size(); ++i) {
+        motor_state.q[i] = hand_state.motor_state()[i].q();
+        motor_state.dq[i] = hand_state.motor_state()[i].dq();
+        motor_state.tau_est[i] = hand_state.motor_state()[i].tau_est();
+        
+        // Handle temperature - it's an array in HandState
+        if (hand_state.motor_state()[i].temperature().size() >= 2) {
+            motor_state.temperature[i][0] = hand_state.motor_state()[i].temperature()[0];
+            motor_state.temperature[i][1] = hand_state.motor_state()[i].temperature()[1];
+        }
+        
+        motor_state.voltage[i] = hand_state.motor_state()[i].vol();
+    }
+    motor_state_buffer_.SetData(motor_state);
+    
+    // Process pressure sensor state
+    PyHandPressSensorState press_sensor_state;
+    for (size_t i = 0; i < DEX3_NUM_PRESS_SENSORS && i < hand_state.press_sensor_state().size(); ++i) {
+        // Copy pressure data
+        const auto& sensor = hand_state.press_sensor_state()[i];
+        for (size_t j = 0; j < 12 && j < sensor.pressure().size(); ++j) {
+            press_sensor_state.pressure[i][j] = sensor.pressure()[j];
+        }
+        for (size_t j = 0; j < 12 && j < sensor.temperature().size(); ++j) {
+            press_sensor_state.temperature[i][j] = sensor.temperature()[j];
+        }
+        press_sensor_state.lost[i] = sensor.lost();
+        
+        // Reserve is a single uint32_t, not an array
+        press_sensor_state.reserve[i][0] = sensor.reserve();
+        // Fill remaining reserve slots with 0
+        for (size_t j = 1; j < 4; ++j) {
+            press_sensor_state.reserve[i][j] = 0;
+        }
+    }
+    press_sensor_buffer_.SetData(press_sensor_state);
+    
+    // Process IMU state
+    PyHandImuState imu_state;
+    const auto& imu = hand_state.imu_state();
+    if (imu.quaternion().size() >= 4) {
+        for (int i = 0; i < 4; ++i) {
+            imu_state.quaternion[i] = imu.quaternion()[i];
+        }
+    }
+    if (imu.gyroscope().size() >= 3) {
+        for (int i = 0; i < 3; ++i) {
+            imu_state.gyroscope[i] = imu.gyroscope()[i];
+        }
+    }
+    if (imu.accelerometer().size() >= 3) {
+        for (int i = 0; i < 3; ++i) {
+            imu_state.accelerometer[i] = imu.accelerometer()[i];
+        }
+    }
+    if (imu.rpy().size() >= 3) {
+        for (int i = 0; i < 3; ++i) {
+            imu_state.rpy[i] = imu.rpy()[i];
+        }
+    }
+    imu_state.temperature = imu.temperature();
+    imu_buffer_.SetData(imu_state);
+}
+
+void HandInterface::HandCommandWriter() {
+    const std::shared_ptr<const PyHandMotorCommand> cmd = motor_command_buffer_.GetData();
+    if (!cmd) {
+        static int no_cmd_counter = 0;
+        if (no_cmd_counter % 1000 == 0) {
+            std::cout << "[DEBUG] HandCommandWriter - No hand command available for " 
+                      << hand_name_ << std::endl;
+        }
+        no_cmd_counter++;
+        return;
+    }
+    
+    // Create hand command message
+    unitree_hg::msg::dds_::HandCmd_ hand_cmd;
+    hand_cmd.motor_cmd().resize(DEX3_NUM_MOTORS);
+    
+    for (int i = 0; i < DEX3_NUM_MOTORS; ++i) {
+        // Set RIS mode
+        RISMode ris_mode;
+        ris_mode.id = i;
+        ris_mode.status = 0x01;  // Enable motor
+        ris_mode.timeout = 0x00; // No timeout
+        
+        hand_cmd.motor_cmd()[i].mode() = ris_mode.ToUint8();
+        hand_cmd.motor_cmd()[i].q() = cmd->q_target[i];
+        hand_cmd.motor_cmd()[i].dq() = cmd->dq_target[i];
+        hand_cmd.motor_cmd()[i].tau() = cmd->tau_ff[i];
+        hand_cmd.motor_cmd()[i].kp() = cmd->kp[i];
+        hand_cmd.motor_cmd()[i].kd() = cmd->kd[i];
+    }
+    
+    hand_cmd_publisher_->Write(hand_cmd);
+}
+
+PyHandState HandInterface::ConvertToPyHandState() {
+    PyHandState py_state;
+    
+    const std::shared_ptr<const PyHandMotorState> motor_state = motor_state_buffer_.GetData();
+    const std::shared_ptr<const PyHandPressSensorState> press_sensor_state = press_sensor_buffer_.GetData();
+    const std::shared_ptr<const PyHandImuState> imu_state = imu_buffer_.GetData();
+    
+    if (motor_state) {
+        py_state.motor = *motor_state;
+    }
+    
+    if (press_sensor_state) {
+        py_state.press_sensor = *press_sensor_state;
+    }
+    
+    if (imu_state) {
+        py_state.imu = *imu_state;
+    }
+    
+    return py_state;
+}
+
+const std::array<float, DEX3_NUM_MOTORS>& HandInterface::GetMaxLimits() const {
+    return (hand_type_ == HandType::LEFT_HAND) ? LEFT_HAND_MAX_LIMITS : RIGHT_HAND_MAX_LIMITS;
+}
+
+const std::array<float, DEX3_NUM_MOTORS>& HandInterface::GetMinLimits() const {
+    return (hand_type_ == HandType::LEFT_HAND) ? LEFT_HAND_MIN_LIMITS : RIGHT_HAND_MIN_LIMITS;
+}
+
+// Python interface methods
+PyHandState HandInterface::ReadHandState() {
+    return ConvertToPyHandState();
+}
+
+void HandInterface::WriteHandCommand(const PyHandMotorCommand& command) {
+    motor_command_buffer_.SetData(command);
+}
+
+PyHandMotorCommand HandInterface::CreateZeroCommand() {
+    PyHandMotorCommand cmd;
+    cmd.kp = default_kp_;
+    cmd.kd = default_kd_;
+    // q_target, dq_target, and tau_ff are already initialized to zero
+    return cmd;
+}
+
+PyHandMotorCommand HandInterface::CreateDefaultCommand() {
+    PyHandMotorCommand cmd = CreateZeroCommand();
+    
+    // Set to default pose
+    if (hand_type_ == HandType::LEFT_HAND) {
+        cmd.q_target = DEFAULT_LEFT_HAND_POSE;
+    } else {
+        cmd.q_target = DEFAULT_RIGHT_HAND_POSE;
+    }
+    
+    return cmd;
+}
+
+std::array<float, DEX3_NUM_MOTORS> HandInterface::GetDefaultKp() const {
+    return default_kp_;
+}
+
+std::array<float, DEX3_NUM_MOTORS> HandInterface::GetDefaultKd() const {
+    return default_kd_;
+}
+
+std::array<float, DEX3_NUM_MOTORS> HandInterface::GetMaxLimitsArray() {
+    return GetMaxLimits();
+}
+
+std::array<float, DEX3_NUM_MOTORS> HandInterface::GetMinLimitsArray() {
+    return GetMinLimits();
+}
+
+void HandInterface::ClampJointAngles(std::array<float, DEX3_NUM_MOTORS>& joint_angles) const {
+    const auto& max_limits = GetMaxLimits();
+    const auto& min_limits = GetMinLimits();
+    
+    for (int i = 0; i < DEX3_NUM_MOTORS; ++i) {
+        joint_angles[i] = std::clamp(joint_angles[i], min_limits[i], max_limits[i]);
+    }
+}
+
+std::array<float, DEX3_NUM_MOTORS> HandInterface::NormalizeJointAngles(const std::array<float, DEX3_NUM_MOTORS>& joint_angles) const {
+    const auto& max_limits = GetMaxLimits();
+    const auto& min_limits = GetMinLimits();
+    
+    std::array<float, DEX3_NUM_MOTORS> normalized;
+    for (int i = 0; i < DEX3_NUM_MOTORS; ++i) {
+        float range = max_limits[i] - min_limits[i];
+        if (range > 0.0f) {
+            normalized[i] = (joint_angles[i] - min_limits[i]) / range;
+            normalized[i] = std::clamp(normalized[i], 0.0f, 1.0f);
+        } else {
+            normalized[i] = 0.0f;
+        }
+    }
+    return normalized;
+}
+
+// Static factory methods
+std::shared_ptr<HandInterface> HandInterface::CreateLeftHand(const std::string& networkInterface, bool re_init) {
+    return std::make_shared<HandInterface>(networkInterface, HandType::LEFT_HAND, re_init);
+}
+
+std::shared_ptr<HandInterface> HandInterface::CreateRightHand(const std::string& networkInterface, bool re_init) {
+    return std::make_shared<HandInterface>(networkInterface, HandType::RIGHT_HAND, re_init);
 } 

@@ -25,24 +25,39 @@
 
 ## 编译
 
-### 从主项目编译（推荐）
-
-在主项目根目录执行：
-
 ```bash
-mkdir build
-cd build
-cmake -DBUILD_PYTHON_BINDING=ON -DCMAKE_BUILD_TYPE=Release .. 
-make -j$(nproc)
+# Clone the Unitree SDK2 repository
+cd ..
+git clone https://github.com/YanjieZe/unitree_sdk2.git
+cd unitree_sdk2
+
+# Install system dependencies
+sudo apt-get update
+sudo apt-get install build-essential cmake python3-dev python3-pip pybind11-dev
+
+# Install Python dependencies
+pip install pybind11 pybind11-stubgen numpy
+
+# Build Python SDK binding
+cd python_binding
+export UNITREE_SDK2_PATH=$(pwd)/..
+bash build.sh --sdk-path $UNITREE_SDK2_PATH
+
+# Install the compiled module to your conda environment
+# Get the site-packages path for your current conda environment
+SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
+echo "Installing to: $SITE_PACKAGES"
+
+# Copy the compiled module (rename to remove version-specific suffix)
+sudo cp build/lib/unitree_interface.cpython-*-linux-gnu.so $SITE_PACKAGES/unitree_interface.so
+
+# Verify installation
+python -c "import unitree_interface; print('✓ Unitree SDK Python binding installed successfully')"
+python -c "import unitree_interface; print('Available robot types:', list(unitree_interface.RobotType.__members__.keys()))"
+
+cd ../..
 ```
 
-### 单独编译
-
-在 `python_binding` 目录中：
-
-```bash
-./build.sh --sdk-path /opt/unitree_sdk2
-```
 
 ## 系统要求
 
